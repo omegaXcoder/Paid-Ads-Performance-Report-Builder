@@ -38,12 +38,12 @@ load_dotenv()
 
 RAW_SPREADSHEET_ID = os.environ.get(
     "RAW_SPREADSHEET_ID", "1v9pqP0IQPsHLF45pTqlHvzkTtg1fHTYNVuNvSzbOU54"
-)
-TEMPLATE_SPREADSHEET_ID = os.environ.get("TEMPLATE_SPREADSHEET_ID", "")
+).strip()
+TEMPLATE_SPREADSHEET_ID = os.environ.get("TEMPLATE_SPREADSHEET_ID", "").strip()
 
 # Leave blank to auto-detect: uses the same Drive folder that
 # RAW_SPREADSHEET_ID already lives in.
-REPORTS_FOLDER_ID = os.environ.get("REPORTS_FOLDER_ID", "")
+REPORTS_FOLDER_ID = os.environ.get("REPORTS_FOLDER_ID", "").strip()
 
 ADS_TAB = "Ads_Raw_Metrics"
 WC_TAB = "WhatConverts_Raw_Leads"
@@ -85,7 +85,10 @@ def get_clients():
 
     gc = gspread.authorize(creds)
     drive_service = build("drive", "v3", credentials=creds)
-    return gc, drive_service
+    # service_account_email is not sensitive (it's a public identifier, not
+    # a credential) — safe to log for debugging "who is actually running this."
+    service_account_email = getattr(creds, "service_account_email", "unknown")
+    return gc, drive_service, service_account_email
 
 
 # ── Period label parsing ─────────────────────────────────────────────────
@@ -474,7 +477,14 @@ def main():
 
     errors = []
     try:
-        gc, drive_service = get_clients()
+        gc, drive_service, service_account_email = get_clients()
+        log(f"Authenticated as service account: {service_account_email}")
+        log(f"TEMPLATE_SPREADSHEET_ID length: {len(TEMPLATE_SPREADSHEET_ID)} "
+            f"(should be ~44 chars, no spaces or slashes)")
+        if not TEMPLATE_SPREADSHEET_ID:
+            raise RuntimeError(
+                "TEMPLATE_SPREADSHEET_ID is empty — check the GitHub secret is set and saved."
+            )
 
         raw_ss = gc.open_by_key(RAW_SPREADSHEET_ID)
         mapping = read_account_mapping(raw_ss)
