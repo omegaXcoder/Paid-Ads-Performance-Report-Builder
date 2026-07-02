@@ -345,6 +345,23 @@ def find_or_create_month_file(gc, drive_service, folder_id, file_name, log, dry_
     if not TEMPLATE_SPREADSHEET_ID:
         raise RuntimeError("TEMPLATE_SPREADSHEET_ID is not set — cannot create a new month file.")
 
+    # Diagnostic: check basic visibility of the template BEFORE attempting
+    # to copy it, so a failure here vs. a failure on copy() tells us
+    # whether this is a visibility problem or a copy-specific permission
+    # problem — two very different fixes.
+    try:
+        meta = drive_service.files().get(
+            fileId=TEMPLATE_SPREADSHEET_ID,
+            fields="id, name, mimeType, driveId, owners",
+            supportsAllDrives=True,
+        ).execute()
+        log(f"Template visibility check OK: name='{meta.get('name')}', "
+            f"mimeType={meta.get('mimeType')}, driveId={meta.get('driveId', 'none (My Drive)')}, "
+            f"owners={[o.get('emailAddress') for o in meta.get('owners', [])]}")
+    except Exception as diag_e:
+        log(f"Template visibility check FAILED: {diag_e}")
+        raise
+
     copied = drive_service.files().copy(
         fileId=TEMPLATE_SPREADSHEET_ID,
         body={"name": file_name, "parents": [folder_id]},
