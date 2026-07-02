@@ -320,9 +320,12 @@ def find_or_create_month_file(gc, drive_service, folder_id, file_name, log, dry_
         log(f"Found existing month file: {file_name} ({files[0]['id']})")
         return gc.open_by_key(files[0]["id"]), False
 
-    log(f"Month file not found — would create: {file_name}")
+    log(f"Month file not found.")
     if dry_run:
+        log(f"DRY RUN — would create: {file_name}")
         return None, True
+
+    log(f"Creating new month file: {file_name}")
 
     if not TEMPLATE_SPREADSHEET_ID:
         raise RuntimeError("TEMPLATE_SPREADSHEET_ID is not set — cannot create a new month file.")
