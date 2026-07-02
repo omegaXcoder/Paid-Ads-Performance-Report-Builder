@@ -481,6 +481,10 @@ def main():
         log(f"Authenticated as service account: {service_account_email}")
         log(f"TEMPLATE_SPREADSHEET_ID length: {len(TEMPLATE_SPREADSHEET_ID)} "
             f"(should be ~44 chars, no spaces or slashes)")
+        if len(TEMPLATE_SPREADSHEET_ID) >= 12:
+            fingerprint = f"{TEMPLATE_SPREADSHEET_ID[:6]}...{TEMPLATE_SPREADSHEET_ID[-6:]}"
+            log(f"TEMPLATE_SPREADSHEET_ID fingerprint: {fingerprint} "
+                f"(compare this to the real ID from your template's URL)")
         if not TEMPLATE_SPREADSHEET_ID:
             raise RuntimeError(
                 "TEMPLATE_SPREADSHEET_ID is empty — check the GitHub secret is set and saved."
