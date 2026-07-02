@@ -124,7 +124,7 @@ def find_col(headers, *keywords):
     return None
 
 
-def read_account_mapping(raw_ss):
+def read_account_mapping(raw_ss, log=None):
     ws = raw_ss.worksheet(MAPPING_TAB)
     rows = ws.get_all_records()
     headers = list(rows[0].keys()) if rows else []
@@ -134,14 +134,25 @@ def read_account_mapping(raw_ss):
     customer_col = find_col(headers, "customer", "id") or "Google Ads Customer ID"
     target_col = find_col(headers, "target") or find_col(headers, "cost", "qualified")
 
+    if log:
+        log(f"Account_Mapping headers found: {headers}")
+        log(f"Matched columns -> name: '{name_col}', profile: '{profile_col}', "
+            f"customer: '{customer_col}', target CPL: '{target_col}'")
+
     mapping = []
     for row in rows:
         name = str(row.get(name_col, "")).strip()
         profile_id = str(row.get(profile_col, "")).strip()
         customer_id = str(row.get(customer_col, "")).strip()
         target_raw = row.get(target_col, "") if target_col else ""
+
+        # get_all_records() returns the DISPLAYED value, so a currency-
+        # formatted cell like "$150.00" arrives as that literal string.
+        # Strip $ , and whitespace before parsing so formatting doesn't
+        # silently turn every target into None.
+        cleaned = re.sub(r"[^\d.\-]", "", str(target_raw))
         try:
-            target_cpl = float(target_raw) if str(target_raw).strip() != "" else None
+            target_cpl = float(cleaned) if cleaned.strip() != "" else None
         except (TypeError, ValueError):
             target_cpl = None
 
@@ -152,6 +163,11 @@ def read_account_mapping(raw_ss):
                 "customer_id": customer_id,
                 "target_cpl": target_cpl,
             })
+
+    if log:
+        sample = [(m["name"], m["target_cpl"]) for m in mapping]
+        log(f"Parsed Target CPL per client: {sample}")
+
     return mapping
 
 
@@ -521,7 +537,7 @@ def main():
             )
 
         raw_ss = gc.open_by_key(RAW_SPREADSHEET_ID)
-        mapping = read_account_mapping(raw_ss)
+        mapping = read_account_mapping(raw_ss, log)
         ads_rows = read_ads_raw(raw_ss)
         wc_rows = read_wc_raw(raw_ss)
         log(f"Loaded {len(mapping)} clients, {len(ads_rows)} Ads rows, {len(wc_rows)} WhatConverts rows.")
