@@ -304,7 +304,9 @@ def compute_total_row(period_data):
 def get_reports_folder_id(drive_service):
     if REPORTS_FOLDER_ID:
         return REPORTS_FOLDER_ID
-    file = drive_service.files().get(fileId=RAW_SPREADSHEET_ID, fields="parents").execute()
+    file = drive_service.files().get(
+        fileId=RAW_SPREADSHEET_ID, fields="parents", supportsAllDrives=True
+    ).execute()
     parents = file.get("parents", [])
     if not parents:
         raise RuntimeError("Could not determine parent folder of RAW_SPREADSHEET_ID.")
@@ -316,7 +318,17 @@ def find_or_create_month_file(gc, drive_service, folder_id, file_name, log, dry_
         f"name = '{file_name}' and '{folder_id}' in parents "
         f"and trashed = false and mimeType = 'application/vnd.google-apps.spreadsheet'"
     )
-    results = drive_service.files().list(q=query, fields="files(id, name)").execute()
+    # supportsAllDrives + includeItemsFromAllDrives + corpora='allDrives' are
+    # required for the API to see files living in a Shared Drive (Team
+    # Drive) — without these, Shared Drive files are silently invisible to
+    # the API even when a human can see them fine in the browser.
+    results = drive_service.files().list(
+        q=query,
+        fields="files(id, name)",
+        supportsAllDrives=True,
+        includeItemsFromAllDrives=True,
+        corpora="allDrives",
+    ).execute()
     files = results.get("files", [])
 
     if files:
@@ -336,6 +348,7 @@ def find_or_create_month_file(gc, drive_service, folder_id, file_name, log, dry_
     copied = drive_service.files().copy(
         fileId=TEMPLATE_SPREADSHEET_ID,
         body={"name": file_name, "parents": [folder_id]},
+        supportsAllDrives=True,
     ).execute()
     log(f"Created new month file: {file_name} ({copied['id']})")
     return gc.open_by_key(copied["id"]), True
