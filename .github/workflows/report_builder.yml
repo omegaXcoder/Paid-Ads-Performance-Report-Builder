@@ -1,0 +1,48 @@
+name: Ads Performance Report Builder
+
+on:
+  # Runs daily at 11:45 UTC — after both the Ads export (~11:00 via Google
+  # Ads Scripts) and the WhatConverts export (~11:20 via GitHub Actions)
+  # should have finished, so this job always reads fresh raw data.
+  schedule:
+    - cron: '45 11 * * *'
+
+  workflow_dispatch:
+    inputs:
+      live:
+        description: 'Run live (create/write the actual report)? Leave unchecked for a dry run.'
+        type: boolean
+        default: false
+
+jobs:
+  build-report:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run report builder
+        env:
+          RAW_SPREADSHEET_ID: ${{ secrets.RAW_SPREADSHEET_ID }}
+          TEMPLATE_SPREADSHEET_ID: ${{ secrets.TEMPLATE_SPREADSHEET_ID }}
+          REPORTS_FOLDER_ID: ${{ secrets.REPORTS_FOLDER_ID }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USERNAME: ${{ secrets.SMTP_USERNAME }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+          RUN_LIVE: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.live) }}
+        run: |
+          if [ "$RUN_LIVE" = "true" ]; then
+            python main.py --live
+          else
+            python main.py
+          fi
