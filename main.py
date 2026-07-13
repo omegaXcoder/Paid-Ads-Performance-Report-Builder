@@ -22,17 +22,43 @@ import argparse
 import datetime
 import json
 import os
+import random
 import re
 import smtplib
 import sys
+import time
 from email.mime.text import MIMEText
 
 import gspread
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
+from gspread.exceptions import APIError
 from dotenv import load_dotenv
 
 load_dotenv()
+
+# ── Retry helper ─────────────────────────────────────────────────────────
+# Google Sheets/Drive occasionally return transient 429/500/503 errors.
+# Wrap network calls in this so one blip doesn't kill an otherwise-good run.
+
+RETRYABLE_STATUS_CODES = {429, 500, 503}
+
+
+def with_retry(fn, *args, max_attempts=5, **kwargs):
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return fn(*args, **kwargs)
+        except (APIError, HttpError) as e:
+            if isinstance(e, APIError):
+                status = e.response.status_code if getattr(e, "response", None) is not None else None
+            else:
+                status = e.resp.status if getattr(e, "resp", None) is not None else None
+            if status not in RETRYABLE_STATUS_CODES or attempt == max_attempts:
+                raise
+            delay = (2 ** (attempt - 1)) + random.uniform(0, 1)
+            time.sleep(delay)
+
 
 # ── Config ────────────────────────────────────────────────────────────
 
@@ -125,8 +151,8 @@ def find_col(headers, *keywords):
 
 
 def read_account_mapping(raw_ss, log=None):
-    ws = raw_ss.worksheet(MAPPING_TAB)
-    rows = ws.get_all_records()
+    ws = with_retry(raw_ss.worksheet, MAPPING_TAB)
+    rows = with_retry(ws.get_all_records)
     headers = list(rows[0].keys()) if rows else []
 
     name_col = find_col(headers, "business", "name") or "Business Name"
@@ -172,8 +198,8 @@ def read_account_mapping(raw_ss, log=None):
 
 
 def read_ads_raw(raw_ss):
-    ws = raw_ss.worksheet(ADS_TAB)
-    rows = ws.get_all_records()
+    ws = with_retry(raw_ss.worksheet, ADS_TAB)
+    rows = with_retry(ws.get_all_records)
 
     parsed = []
     for row in rows:
@@ -196,8 +222,8 @@ def read_ads_raw(raw_ss):
 
 
 def read_wc_raw(raw_ss):
-    ws = raw_ss.worksheet(WC_TAB)
-    rows = ws.get_all_records()
+    ws = with_retry(raw_ss.worksheet, WC_TAB)
+    rows = with_retry(ws.get_all_records)
 
     parsed = []
     for row in rows:
@@ -320,9 +346,11 @@ def compute_total_row(period_data):
 def get_reports_folder_id(drive_service):
     if REPORTS_FOLDER_ID:
         return REPORTS_FOLDER_ID
-    file = drive_service.files().get(
-        fileId=RAW_SPREADSHEET_ID, fields="parents", supportsAllDrives=True
-    ).execute()
+    file = with_retry(
+        drive_service.files().get(
+            fileId=RAW_SPREADSHEET_ID, fields="parents", supportsAllDrives=True
+        ).execute
+    )
     parents = file.get("parents", [])
     if not parents:
         raise RuntimeError("Could not determine parent folder of RAW_SPREADSHEET_ID.")
@@ -338,18 +366,20 @@ def find_or_create_month_file(gc, drive_service, folder_id, file_name, log, dry_
     # required for the API to see files living in a Shared Drive (Team
     # Drive) — without these, Shared Drive files are silently invisible to
     # the API even when a human can see them fine in the browser.
-    results = drive_service.files().list(
-        q=query,
-        fields="files(id, name)",
-        supportsAllDrives=True,
-        includeItemsFromAllDrives=True,
-        corpora="allDrives",
-    ).execute()
+    results = with_retry(
+        drive_service.files().list(
+            q=query,
+            fields="files(id, name)",
+            supportsAllDrives=True,
+            includeItemsFromAllDrives=True,
+            corpora="allDrives",
+        ).execute
+    )
     files = results.get("files", [])
 
     if files:
         log(f"Found existing month file: {file_name} ({files[0]['id']})")
-        return gc.open_by_key(files[0]["id"]), False
+        return with_retry(gc.open_by_key, files[0]["id"]), False
 
     log(f"Month file not found.")
     if dry_run:
@@ -366,11 +396,13 @@ def find_or_create_month_file(gc, drive_service, folder_id, file_name, log, dry_
     # whether this is a visibility problem or a copy-specific permission
     # problem — two very different fixes.
     try:
-        meta = drive_service.files().get(
-            fileId=TEMPLATE_SPREADSHEET_ID,
-            fields="id, name, mimeType, driveId, owners",
-            supportsAllDrives=True,
-        ).execute()
+        meta = with_retry(
+            drive_service.files().get(
+                fileId=TEMPLATE_SPREADSHEET_ID,
+                fields="id, name, mimeType, driveId, owners",
+                supportsAllDrives=True,
+            ).execute
+        )
         log(f"Template visibility check OK: name='{meta.get('name')}', "
             f"mimeType={meta.get('mimeType')}, driveId={meta.get('driveId', 'none (My Drive)')}, "
             f"owners={[o.get('emailAddress') for o in meta.get('owners', [])]}")
@@ -378,22 +410,24 @@ def find_or_create_month_file(gc, drive_service, folder_id, file_name, log, dry_
         log(f"Template visibility check FAILED: {diag_e}")
         raise
 
-    copied = drive_service.files().copy(
-        fileId=TEMPLATE_SPREADSHEET_ID,
-        body={"name": file_name, "parents": [folder_id]},
-        supportsAllDrives=True,
-    ).execute()
+    copied = with_retry(
+        drive_service.files().copy(
+            fileId=TEMPLATE_SPREADSHEET_ID,
+            body={"name": file_name, "parents": [folder_id]},
+            supportsAllDrives=True,
+        ).execute
+    )
     log(f"Created new month file: {file_name} ({copied['id']})")
-    return gc.open_by_key(copied["id"]), True
+    return with_retry(gc.open_by_key, copied["id"]), True
 
 
 def seed_account_mapping_tab(month_ss, mapping, log, dry_run):
     log(f"Seeding {TEMPLATE_MAPPING_TAB} with {len(mapping)} clients (one-time, new month only).")
     if dry_run:
         return
-    ws = month_ss.worksheet(TEMPLATE_MAPPING_TAB)
+    ws = with_retry(month_ss.worksheet, TEMPLATE_MAPPING_TAB)
     values = [[m["name"], m["profile_id"], m["customer_id"], m["target_cpl"]] for m in mapping]
-    ws.update(f"A5:D{4 + len(values)}", values, value_input_option="USER_ENTERED")
+    with_retry(ws.update, f"A5:D{4 + len(values)}", values, value_input_option="USER_ENTERED")
 
 
 # ── Writing a day's data into a tab ──────────────────────────────────────
@@ -402,8 +436,8 @@ def duplicate_and_rename(month_ss, source_tab_name, new_tab_name, log, dry_run):
     log(f"Duplicating '{source_tab_name}' -> '{new_tab_name}'")
     if dry_run:
         return None
-    source_ws = month_ss.worksheet(source_tab_name)
-    new_ws = month_ss.duplicate_sheet(source_ws.id, new_sheet_name=new_tab_name)
+    source_ws = with_retry(month_ss.worksheet, source_tab_name)
+    new_ws = with_retry(month_ss.duplicate_sheet, source_ws.id, new_sheet_name=new_tab_name)
     return new_ws
 
 
@@ -419,14 +453,14 @@ def write_period_table(ws, period, business_order, period_data, snapshot_generat
             date_range = row["date_range"]
             break
     section_text = f"Account Performance — {period} ({date_range})"
-    ws.update_acell(rows_cfg["section_cell"], section_text)
+    with_retry(ws.update_acell, rows_cfg["section_cell"], section_text)
 
     if "snapshot_cell" in rows_cfg:
         snapshot_text = (
             f"Snapshot: {period} ({date_range})  |  Data sources: Google Ads + WhatConverts  |  "
             f"Generated {snapshot_generated_at}"
         )
-        ws.update_acell(rows_cfg["snapshot_cell"], snapshot_text)
+        with_retry(ws.update_acell, rows_cfg["snapshot_cell"], snapshot_text)
 
     # Data rows
     data_matrix = []
@@ -456,12 +490,12 @@ def write_period_table(ws, period, business_order, period_data, snapshot_generat
             round(r["pct_diff"], 4) if r["pct_diff"] is not None else "",
         ])
 
-    ws.update(f"A{start_row}:K{end_row}", data_matrix, value_input_option="USER_ENTERED")
-    ws.update(f"M{start_row}:N{end_row}", hidden_matrix, value_input_option="USER_ENTERED")
+    with_retry(ws.update, f"A{start_row}:K{end_row}", data_matrix, value_input_option="USER_ENTERED")
+    with_retry(ws.update, f"M{start_row}:N{end_row}", hidden_matrix, value_input_option="USER_ENTERED")
 
     # TOTAL / BLENDED row
     totals = compute_total_row(period_data)
-    ws.update(f"A{total_row}:I{total_row}", [[
+    with_retry(ws.update, f"A{total_row}:I{total_row}", [[
         "TOTAL / BLENDED", totals["spend"], totals["clicks"], totals["ctr"],
         totals["qualified"], totals["cost_per_qual"], totals["cost_per_conversion"],
         totals["sales_value"], totals["roas"],
@@ -471,7 +505,7 @@ def write_period_table(ws, period, business_order, period_data, snapshot_generat
 
 
 def clear_footnote(ws, log):
-    ws.update_acell(FOOTNOTE_CELL, "")
+    with_retry(ws.update_acell, FOOTNOTE_CELL, "")
     log(f"Cleared footnote cell {FOOTNOTE_CELL}.")
 
 
@@ -536,7 +570,7 @@ def main():
                 "TEMPLATE_SPREADSHEET_ID is empty — check the GitHub secret is set and saved."
             )
 
-        raw_ss = gc.open_by_key(RAW_SPREADSHEET_ID)
+        raw_ss = with_retry(gc.open_by_key, RAW_SPREADSHEET_ID)
         mapping = read_account_mapping(raw_ss, log)
         ads_rows = read_ads_raw(raw_ss)
         wc_rows = read_wc_raw(raw_ss)
